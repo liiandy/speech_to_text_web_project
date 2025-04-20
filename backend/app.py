@@ -52,6 +52,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+import yt_dlp
+
 @app.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
     # 檢查檔案格式
@@ -69,11 +71,9 @@ async def transcribe_audio(file: UploadFile = File(...)):
     
     # 非同步執行語音轉文字，並通過 WebSocket 傳送狀態
     def process_and_notify():
-        # 模擬非同步
         import time
         time.sleep(0.1)
         success = processor.process_audio(temp_path)
-        # 讀取輸出檔案內容
         base_output_dir = "/Users/andy/Desktop/speech_to_text_project"
         output_dir = os.path.join(base_output_dir, processor.config.OUTPUT_DIR)
         base_name = os.path.splitext(filename)[0]
@@ -94,6 +94,81 @@ async def transcribe_audio(file: UploadFile = File(...)):
 
     original_text, processed_text, summary_text = await asyncio.to_thread(process_and_notify)
 
+    return JSONResponse(content={
+        "original_text": original_text,
+        "processed_text": processed_text,
+        "summary": summary_text
+    })
+
+@app.post("/transcribe_youtube")
+async def transcribe_youtube(url_data: dict):
+    url = url_data.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="缺少 YouTube 畫面網址")
+    
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_audio_path = os.path.join(temp_dir, "youtube_audio.%(ext)s")
+    
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": temp_audio_path,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+        "quiet": True,
+        "no_warnings": True,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        print(f"YouTube 畫面下載失敗: {str(e)}\n詳細錯誤:\n{error_msg}")
+        raise HTTPException(status_code=500, detail=f"YouTube 畫面下載失敗: {str(e)}\n詳細錯誤:\n{error_msg}")
+    
+    # 下載後獲取實際檔案路徑
+    downloaded_files = [f for f in os.listdir(temp_dir) if f.startswith("youtube_audio") and f.endswith(".mp3")]
+    if not downloaded_files:
+        print("下載的音話檔案不存在")
+        raise HTTPException(status_code=500, detail="下載的音話檔案不存在")
+    actual_audio_path = os.path.join(temp_dir, downloaded_files[0])
+    
+    # 使用現有語音轉文字流程
+    try:
+        success = processor.process_audio(actual_audio_path)
+    except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        print(f"語音轉文字處理失敗: {str(e)}\n詳細錯誤:\n{error_msg}")
+        raise HTTPException(status_code=500, detail=f"語音轉文字處理失敗: {str(e)}\n詳細錯誤:\n{error_msg}")
+    
+    base_output_dir = "/Users/andy/Desktop/speech_to_text_project"
+    output_dir = os.path.join(base_output_dir, processor.config.OUTPUT_DIR)
+    base_name = "youtube_audio"
+    
+    def get_latest_file(suffix):
+        files = [f for f in os.listdir(output_dir) if f.endswith(suffix) and base_name in f]
+        files.sort(reverse=True)
+        if files:
+            with open(os.path.join(output_dir, files[0]), 'r', encoding='utf-8') as f:
+                return f.read()
+        return ""
+    
+    original_text = get_latest_file("_original.txt")
+    processed_text = get_latest_file("_processed.txt")
+    summary_text = get_latest_file("_summary.txt")
+    
+    os.remove(actual_audio_path)
+    
+    if not success:
+        print("語音轉文字處理失敗")
+        raise HTTPException(status_code=500, detail="語音轉文字處理失敗")
+    
     return JSONResponse(content={
         "original_text": original_text,
         "processed_text": processed_text,
